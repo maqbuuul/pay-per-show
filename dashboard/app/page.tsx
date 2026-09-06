@@ -1,0 +1,197 @@
+import {
+  getUnmarked, getUnbilled, getShowRates, getOpenDisputes, money, sum,
+} from '@/lib/db';
+
+// Always fresh. A billing figure cached for an hour is a billing figure
+// somebody quotes to a client wrongly.
+export const dynamic = 'force-dynamic';
+
+const STALE_DAYS = 7;
+
+export default async function Page() {
+  const [unmarked, unbilled, rates, disputes] = await Promise.all([
+    getUnmarked(), getUnbilled(), getShowRates(), getOpenDisputes(),
+  ]);
+
+  const atRisk = sum(unmarked, 'revenue_at_risk_usd');
+  const unmarkedCount = sum(unmarked, 'unmarked');
+  const readyToBill = sum(unbilled, 'value_usd');
+  const stale = unmarked.filter(r => Number(r.avg_days_stale) >= STALE_DAYS);
+
+  return (
+    <main>
+      <header className="top">
+        <h1>Pay Per Show</h1>
+        <p>Billing reconciliation · {new Date().toLocaleDateString('en-GB', {
+          day: 'numeric', month: 'long', year: 'numeric',
+        })}</p>
+      </header>
+
+      <section className="tiles">
+        <div className="tile">
+          <span className="label">Ready to invoice</span>
+          <span className="figure">{money(readyToBill)}</span>
+          <span className="note">{sum(unbilled, 'shows')} attended, not yet billed</span>
+        </div>
+        <div className={`tile ${atRisk > 0 ? 'warn' : ''}`}>
+          <span className="label">Not invoiced — nobody marked</span>
+          <span className="figure">{money(atRisk)}</span>
+          <span className="note">{unmarkedCount} appointments with no outcome</span>
+        </div>
+        <div className={`tile ${stale.length ? 'alert' : ''}`}>
+          <span className="label">Clinics gone quiet</span>
+          <span className="figure">{stale.length}</span>
+          <span className="note">averaging {STALE_DAYS}+ days without an outcome</span>
+        </div>
+        <div className={`tile ${disputes.length ? 'warn' : ''}`}>
+          <span className="label">Open disputes</span>
+          <span className="figure">{disputes.length}</span>
+          <span className="note">awaiting a decision</span>
+        </div>
+      </section>
+
+      <section>
+        <h2>Appointments nobody marked</h2>
+        <p className="sub">
+          Each of these is either revenue never invoiced, or a front desk that has
+          stopped recording attendance. Both need chasing, for different reasons —
+          and neither raises an error on its own.
+        </p>
+        {unmarked.length === 0 ? (
+          <p className="empty">Nothing outstanding. Every past appointment has an outcome.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Clinic</th>
+                <th className="n">Unmarked</th>
+                <th className="n">Not invoiced</th>
+                <th className="n">Avg age</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {unmarked.map(r => {
+                const isStale = Number(r.avg_days_stale) >= STALE_DAYS;
+                return (
+                  <tr key={r.clinic_id} className={isStale ? 'row-alert' : ''}>
+                    <td>{r.business_name}</td>
+                    <td className="n">{r.unmarked}</td>
+                    <td className="n strong">{money(r.revenue_at_risk_usd)}</td>
+                    <td className="n">{Number(r.avg_days_stale).toFixed(0)}d</td>
+                    <td className="flag">
+                      {isStale ? 'front desk has stopped recording' : ''}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section>
+        <h2>Ready to invoice</h2>
+        <p className="sub">
+          Attended, billable under the contract, not yet on an invoice.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Clinic</th>
+              <th className="n">Shows</th>
+              <th className="n">Value</th>
+              <th className="n">Oldest</th>
+            </tr>
+          </thead>
+          <tbody>
+            {unbilled.map(r => (
+              <tr key={r.clinic_id}>
+                <td>{r.business_name}</td>
+                <td className="n">{r.shows}</td>
+                <td className="n strong">{money(r.value_usd)}</td>
+                <td className="n dim">
+                  {new Date(r.oldest).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Show rate</h2>
+        <p className="sub">
+          Attended over resolved. Cancellations are excluded — a patient who
+          cancelled in advance did not fail to attend, and merging the two makes
+          the number useless for the conversation it exists to support.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Clinic</th>
+              <th className="n">Attended</th>
+              <th className="n">No-show</th>
+              <th className="n">Unmarked</th>
+              <th className="n">Show rate</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rates.map(r => {
+              const pct = r.show_rate_pct === null ? null : Number(r.show_rate_pct);
+              const poor = pct !== null && pct < 55;
+              return (
+                <tr key={r.clinic_id} className={poor ? 'row-warn' : ''}>
+                  <td>{r.business_name}</td>
+                  <td className="n">{r.attended}</td>
+                  <td className="n">{r.no_shows}</td>
+                  <td className="n">{r.unmarked || '—'}</td>
+                  <td className="n strong">{pct === null ? '—' : `${pct.toFixed(1)}%`}</td>
+                  <td className="flag">{poor ? 'check the confirmation step, not the ads' : ''}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </section>
+
+      {disputes.length > 0 && (
+        <section>
+          <h2>Open disputes</h2>
+          <p className="sub">
+            Watch the upheld rate, not the count. A rising upheld percentage means
+            the attendance data is wrong, and that is a bigger problem than the credits.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Clinic</th>
+                <th>Raised</th>
+                <th>Reason</th>
+                <th>Appointment</th>
+              </tr>
+            </thead>
+            <tbody>
+              {disputes.map(d => (
+                <tr key={d.dispute_id}>
+                  <td>{d.business_name}</td>
+                  <td className="dim">
+                    {new Date(d.raised_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                  </td>
+                  <td>{d.reason}</td>
+                  <td className="mono dim">{d.appointment_id}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      <footer>
+        Read-only. Billing state changes belong to the n8n workflows, where they
+        are logged and idempotent. Nothing is auto-marked and nothing is auto-sent.
+      </footer>
+    </main>
+  );
+}

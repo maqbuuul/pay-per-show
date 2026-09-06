@@ -1,0 +1,143 @@
+{
+  "name": "01 - Nightly outcome sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trg-sync-0001",
+      "name": "2am daily",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT clinic_id, business_name, timezone, rate_per_show_cents, bills_returning\nFROM clinics\nWHERE status = 'active'\nORDER BY clinic_id;",
+        "options": {}
+      },
+      "id": "clinics-0002",
+      "name": "Active clinics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.CALENDAR_API_URL }}/bookings",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "clinicId", "value": "={{ $json.clinic_id }}" },
+            { "name": "afterStart", "value": "={{ new Date(Date.now() - Number($env.SYNC_WINDOW_DAYS || 45) * 86400000).toISOString() }}" },
+            { "name": "beforeEnd", "value": "={{ new Date().toISOString() }}" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.CALENDAR_API_KEY }}" }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "fetch-0003",
+      "name": "Fetch bookings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, 300],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full refresh over a trailing window, not an incremental sync.\n//\n// Attendance gets corrected days after the fact by a front desk catching up,\n// and a CRM whose webhooks occasionally drop leaves the billing data quietly\n// wrong with no way to identify which rows. Being quietly wrong about an\n// invoice is worse than being loudly late with one.\n\nconst clinic = $('Active clinics').first().json;\nconst body = $input.first().json;\nconst bookings = Array.isArray(body) ? body : (body.bookings || body.data || []);\n\n// An empty result and a failed API call look identical until you check.\nif (!Array.isArray(bookings)) {\n  return [{ json: { clinic_id: clinic.clinic_id, error: 'unreadable response', rows: [] } }];\n}\n\nconst STATUS = {\n  accepted: 'booked',\n  pending: 'booked',\n  confirmed: 'confirmed',\n  attended: 'attended',\n  completed: 'attended',\n  noshow: 'no_show',\n  no_show: 'no_show',\n  cancelled: 'cancelled',\n  rejected: 'cancelled'\n};\n\nconst rows = bookings.map(b => {\n  const raw = String(b.status || b.outcome || '').toLowerCase().replace(/[^a-z_]/g, '');\n  const starts = b.startTime || b.start || b.starts_at;\n  const past = new Date(starts) < new Date();\n  // 'unmarked' is a state, not an absence. An appointment nobody marked is\n  // not a no-show -- it is missing data, and missing data is unbilled revenue.\n  const outcome = STATUS[raw] || (past ? 'unmarked' : 'booked');\n  return {\n    appointment_id: String(b.uid || b.id),\n    clinic_id: clinic.clinic_id,\n    contact_id: b.attendeeId || b.contact_id || null,\n    booked_at: b.createdAt || b.booked_at || starts,\n    starts_at: starts,\n    outcome,\n    outcome_at: outcome === 'unmarked' ? null : (b.updatedAt || null),\n    outcome_source: 'calendar_sync',\n    is_new_patient: b.isNewPatient !== false,\n    booked_by: b.bookedByAgent ? 'agent' : 'human'\n  };\n}).filter(r => r.appointment_id && r.starts_at);\n\nreturn [{ json: { clinic_id: clinic.clinic_id, count: rows.length, rows } }];"
+      },
+      "id": "norm-0004",
+      "name": "Normalise outcomes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-20, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Idempotent on appointment_id. The sync re-runs the same window nightly,\n-- so every write must be safe to repeat.\n--\n-- Rates are NOT touched here. A rate is frozen onto the event when it becomes\n-- billable, and re-deriving it later would silently rewrite an invoice.\nINSERT INTO billable_events\n  (appointment_id, clinic_id, contact_id, booked_at, starts_at,\n   outcome, outcome_at, outcome_source, is_new_patient, booked_by, synced_at)\nSELECT r->>'appointment_id',\n       r->>'clinic_id',\n       nullif(r->>'contact_id',''),\n       (r->>'booked_at')::timestamptz,\n       (r->>'starts_at')::timestamptz,\n       r->>'outcome',\n       nullif(r->>'outcome_at','')::timestamptz,\n       r->>'outcome_source',\n       (r->>'is_new_patient')::boolean,\n       r->>'booked_by',\n       now()\nFROM jsonb_array_elements($1::jsonb) AS r\nON CONFLICT (appointment_id) DO UPDATE\n   SET outcome       = EXCLUDED.outcome,\n       outcome_at    = EXCLUDED.outcome_at,\n       outcome_source= EXCLUDED.outcome_source,\n       synced_at     = now()\n   -- never walk an invoiced line backwards\n   WHERE billable_events.state NOT IN ('invoiced','written_off');",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify($json.rows) }}"
+        }
+      },
+      "id": "upsert-0005",
+      "name": "Upsert billable events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [200, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Promote attended events to billable, freezing the rate at this moment.\nUPDATE billable_events b\n   SET state = 'billable',\n       rate_cents = c.rate_per_show_cents\n  FROM clinics c\n WHERE b.clinic_id = c.clinic_id\n   AND b.state = 'pending'\n   AND b.outcome = 'attended'\n   AND (c.bills_returning OR b.is_new_patient)\nRETURNING b.appointment_id;",
+        "options": {}
+      },
+      "id": "promote-0006",
+      "name": "Freeze rate on billable",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [420, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "2am daily": {
+      "main": [[{ "node": "Active clinics", "type": "main", "index": 0 }]]
+    },
+    "Active clinics": {
+      "main": [[{ "node": "Fetch bookings", "type": "main", "index": 0 }]]
+    },
+    "Fetch bookings": {
+      "main": [[{ "node": "Normalise outcomes", "type": "main", "index": 0 }]]
+    },
+    "Normalise outcomes": {
+      "main": [[{ "node": "Upsert billable events", "type": "main", "index": 0 }]]
+    },
+    "Upsert billable events": {
+      "main": [[{ "node": "Freeze rate on billable", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

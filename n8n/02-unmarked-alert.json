@@ -1,0 +1,125 @@
+{
+  "name": "02 - Unmarked appointment alert",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "trg-unmarked-0001",
+      "name": "Weekday 9am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Appointments whose time has passed that nobody ever marked.\n-- Each one is either revenue never invoiced, or a front desk that has\n-- stopped recording attendance. Both need chasing, for different reasons.\nSELECT clinic_id,\n       business_name,\n       unmarked,\n       revenue_at_risk_usd,\n       oldest,\n       avg_days_stale\nFROM v_unmarked_appointments\nWHERE unmarked > 0\nORDER BY revenue_at_risk_usd DESC;",
+        "options": {}
+      },
+      "id": "qry-unmarked-0002",
+      "name": "Read unmarked view",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-240, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-rows",
+              "leftValue": "={{ $json.clinic_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-any-0003",
+      "name": "Anything unmarked?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-20, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One message for the whole agency, not one per clinic. A channel that\n// fires six times every morning gets muted within a fortnight.\n//\n// Severity is by staleness, not by amount. A small sum from three weeks ago\n// is a broken process; a large sum from yesterday is just Monday.\n\nconst rows = $input.all().map(i => i.json);\n\nconst money = n => '$' + Number(n || 0).toFixed(2);\nconst totalRisk = rows.reduce((s, r) => s + Number(r.revenue_at_risk_usd || 0), 0);\nconst totalCount = rows.reduce((s, r) => s + Number(r.unmarked || 0), 0);\n\nconst stale = rows.filter(r => Number(r.avg_days_stale) >= 7);\n\nconst lines = rows.map(r => {\n  const days = Number(r.avg_days_stale).toFixed(0);\n  const flag = Number(r.avg_days_stale) >= 7 ? ' :warning:' : '';\n  return `• *${r.business_name}* — ${r.unmarked} unmarked, ${money(r.revenue_at_risk_usd)} not invoiced, avg ${days}d old${flag}`;\n});\n\nlet header = `*${totalCount} appointments never marked* — ${money(totalRisk)} not invoiced`;\n\nlet footer = '_Nothing is auto-marked. Guessing an outcome to clear an alert is how a billing system starts inventing revenue._';\n\nif (stale.length) {\n  footer = `:rotating_light: *${stale.length} clinic(s) averaging a week or more.* That is a front desk that has stopped recording attendance — every other number for them is degrading with it.\\n\\n` + footer;\n}\n\nreturn [{\n  json: {\n    clinics: rows.length,\n    total_unmarked: totalCount,\n    total_at_risk_usd: Number(totalRisk.toFixed(2)),\n    stale_clinics: stale.length,\n    text: [header, '', ...lines, '', footer].join('\\n')\n  }\n}];"
+      },
+      "id": "fmt-msg-0004",
+      "name": "Compose the alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [200, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "slack-0005",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 200]
+    },
+    {
+      "parameters": {},
+      "id": "noop-0006",
+      "name": "Nothing outstanding",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [200, 400]
+    }
+  ],
+  "connections": {
+    "Weekday 9am": {
+      "main": [[{ "node": "Read unmarked view", "type": "main", "index": 0 }]]
+    },
+    "Read unmarked view": {
+      "main": [[{ "node": "Anything unmarked?", "type": "main", "index": 0 }]]
+    },
+    "Anything unmarked?": {
+      "main": [
+        [{ "node": "Compose the alert", "type": "main", "index": 0 }],
+        [{ "node": "Nothing outstanding", "type": "main", "index": 0 }]
+      ]
+    },
+    "Compose the alert": {
+      "main": [[{ "node": "Post to Slack", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
