@@ -4,7 +4,13 @@ import { neon } from '@neondatabase/serverless';
 // state changes belong to the n8n workflows, where they are logged and
 // idempotent. A dashboard that can mutate an invoice is a dashboard that will,
 // by accident, at 5pm on a Friday.
-const sql = neon(process.env.DATABASE_URL!);
+//
+// The client is constructed lazily. Next.js imports this module at build time
+// while collecting page data, and DATABASE_URL is a runtime secret -- a
+// top-level `neon(...)` call would fail the build on any machine (or CI step)
+// that does not hold the connection string.
+let sql: ReturnType<typeof neon> | null = null;
+const db = () => (sql ??= neon(process.env.DATABASE_URL!));
 
 export type Unmarked = {
   clinic_id: string;
@@ -44,11 +50,11 @@ export type Dispute = {
 };
 
 export async function getUnmarked() {
-  return (await sql`SELECT * FROM v_unmarked_appointments`) as Unmarked[];
+  return (await db()`SELECT * FROM v_unmarked_appointments`) as Unmarked[];
 }
 
 export async function getUnbilled() {
-  return (await sql`
+  return (await db()`
     SELECT * FROM v_unbilled_shows ORDER BY value_usd DESC
   `) as Unbilled[];
 }
@@ -56,7 +62,7 @@ export async function getUnbilled() {
 export async function getShowRates() {
   // The view is keyed by clinic_id; join the name on here rather than widening
   // the view, so the metric definition stays about the metric.
-  return (await sql`
+  return (await db()`
     SELECT r.*, c.business_name
     FROM v_clinic_show_rate r
     JOIN clinics c USING (clinic_id)
@@ -65,7 +71,7 @@ export async function getShowRates() {
 }
 
 export async function getOpenDisputes() {
-  return (await sql`
+  return (await db()`
     SELECT d.dispute_id, d.appointment_id, d.raised_at, d.reason, d.resolution,
            c.business_name
     FROM disputes d
