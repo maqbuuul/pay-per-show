@@ -1,193 +1,176 @@
-# Pay Per Show — Billing Reconciliation for Agencies Paid on Attendance
+# Pay Per Show
 
-The billing engine for an agency that takes **$0 until a patient walks in**. It proves who showed up, freezes the rate so history can't be rewritten, and surfaces the appointments nobody marked — which under pay-per-show is revenue never invoiced.
+**Reconciles attended appointments into billable shows — the billing engine for
+an agency that takes $0 until a patient walks in.**
 
-**Stack:** Postgres (Neon) · n8n · Next.js read-only dashboard · Vercel
-
-> 🔗 **Live dashboard:** [paste Vercel URL here]
-> 🎥 **Demo video:** [paste Loom URL here — n8n run finding the $1,520, used in Conek tech application]
-
----
-
-## 1. The problem
-
-If you bill per patient who shows up, somebody has to prove who showed up. At five clinics that's a spreadsheet. At five hundred it's a full-time job nobody has — and it fails silently in three directions:
-
-- **Appointments nobody marked.** Not a no-show — missing data. Under pay-per-show that's revenue you never invoiced.
-- **Disputes you can't answer.** "That patient never came," six weeks later. What's the evidence?
-- **Rates that moved.** You raised a clinic in March; a June reprint must still show March's number.
-
-None of these throw an error. They just quietly cost money.
+[![Postgres](https://img.shields.io/badge/Neon_Postgres-16-336791?logo=postgresql&logoColor=white)](https://neon.tech)
+[![n8n](https://img.shields.io/badge/n8n-3_workflows-EA4B71?logo=n8n&logoColor=white)](https://n8n.io)
+[![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://typescriptlang.org)
+[![Vercel](https://img.shields.io/badge/Vercel-dashboard-000000?logo=vercel&logoColor=white)](https://vercel.com)
+[![Tests](https://img.shields.io/badge/tests-10_passing-1c6b58)](db/verify.mjs)
+[![License](https://img.shields.io/badge/license-MIT-1c6b58)](LICENSE)
 
 ---
 
-## 2. The view that finds money
+## The problem
+
+If you bill per patient who shows up, somebody has to prove who showed up.
+
+At five clinics that's a spreadsheet. At five hundred it's a full-time job
+nobody has, and it fails in three directions at once — none of which throws an
+error:
+
+- **Appointments nobody marked.** Not a no-show. Missing data. Under
+  pay-per-show that is revenue never invoiced
+- **Disputes you can't answer.** A clinic says "that patient never came." Six
+  weeks later, what's the evidence?
+- **Rates that moved.** You raised a clinic's rate in March. An invoice
+  regenerated in June must still show March's number
+
+## Architecture
+
+```mermaid
+flowchart LR
+    SRC["Clinic calendar<br/>GoHighLevel · Cal.com"]:::ext
+
+    subgraph n8n["n8n · scheduled"]
+        SYNC["01 nightly outcome sync<br/>full refresh, 45d window"]
+        ALERT["02 unmarked alert<br/>weekday 09:00"]
+        INV["03 invoice generation<br/>1st of month"]
+    end
+
+    subgraph db["Neon · Postgres"]
+        BE[("billable_events")]
+        INVT[("invoices")]
+        DISP[("disputes")]
+        V["v_unmarked_appointments<br/>v_unbilled_shows<br/>v_clinic_show_rate"]
+    end
+
+    DASH["Dashboard<br/>Vercel · read-only"]
+    SLACK["Slack"]:::ext
+
+    SRC --> SYNC
+    SYNC -- "idempotent upsert" --> BE
+    SYNC -- "freeze rate<br/>when it becomes billable" --> BE
+    BE --> V
+    DISP --> V
+    ALERT --> V
+    ALERT -- "revenue nobody invoiced" --> SLACK
+    INV --> BE
+    INV -- "draft, never sent" --> INVT
+    V --> DASH
+
+    classDef ext fill:#f2efe9,stroke:#cfc8ba,color:#46574f
+    classDef default fill:#ffffff,stroke:#0d3b34,color:#14201d
+    style n8n fill:#eef4f2,stroke:#bcd5cf
+    style db fill:#f4f1ec,stroke:#dfd8cc
+```
+
+## The view that finds money
 
 ```sql
 SELECT * FROM v_unmarked_appointments;
 ```
 
-Appointments whose time passed that nobody ever marked attended or no-show — with the revenue attached:
-
 ```
- clinic_id | business_name       | unmarked | revenue_at_risk_usd | avg_days_stale
------------+---------------------+----------+---------------------+----------------
- riverside | Riverside Chiro     |       16 |             1520.00 |           10.0
-```
-
-Two different problems produce that row and both need chasing: the front desk stopped recording (you're under-billing), or nobody is checking (every downstream number is rotting). **Run this first against any real account — it's usually not zero.**
-
----
-
-## 3. Three rules, enforced in the schema
-
-1. **`unmarked` is a state, not an absence.** Collapsing it into no-show makes show rate look worse, revenue look smaller, and hides that somebody stopped filling in a field.
-2. **The rate is copied onto the event when it becomes billable, never re-read at invoice time.** Re-deriving from today's rate card silently rewrites history — and the first time a clinic notices, every invoice you've sent becomes questionable.
-3. **Cancelled is not no-show.** A patient who cancelled in advance didn't fail to attend. Conflating them makes show rate useless for the conversation it exists to support.
-
----
-
-## 4. Database (ERD)
-
-`billable_events` rows are created **at booking time, not attendance time** — so appointments with no outcome are visible rather than absent. A show is never deleted, only moved through states.
-
-```mermaid
-erDiagram
-    CLINICS ||--o{ BILLABLE_EVENTS : "owns appointments"
-    CLINICS ||--o{ INVOICES : "billed per period"
-    BILLABLE_EVENTS ||--o{ DISPUTES : "challenged by"
-    INVOICES ||--o{ DISPUTES : "lines disputed on"
-    BILLABLE_EVENTS ||--o{ V_UNBILLED_SHOWS : "attended, uninvoiced"
-    BILLABLE_EVENTS ||--o{ V_UNMARKED_APPOINTMENTS : "past, no outcome"
-    BILLABLE_EVENTS ||--o{ V_CLINIC_SHOW_RATE : "resolved-rate input"
-    DISPUTES ||--o{ V_DISPUTE_SUMMARY : "trust signal"
-
-    CLINICS {
-        text clinic_id PK "GHL sub-account"
-        text business_name
-        text timezone
-        text status
-        int rate_per_show_cents "the business model"
-        text billing_period "monthly | weekly"
-        int minimum_cents
-        text currency
-        boolean bills_returning "follow-ups bill? usually false"
-    }
-    BILLABLE_EVENTS {
-        text appointment_id PK "GHL appointment"
-        text clinic_id FK
-        text contact_id
-        timestamptz booked_at
-        timestamptz starts_at
-        text outcome "attended|no_show|cancelled|unmarked"
-        timestamptz outcome_at
-        text outcome_source "ghl_sync | manual | dispute"
-        boolean is_new_patient
-        text booked_by "agent | human"
-        text state "pending|billable|invoiced|disputed|written_off|not_billable"
-        int rate_cents "FROZEN at billable moment"
-        text invoice_id
-    }
-    INVOICES {
-        text invoice_id PK
-        text clinic_id FK
-        date period_start
-        date period_end
-        int shows_count
-        int subtotal_cents
-        int adjustment_cents "credits from upheld disputes"
-        int total_cents
-        text status "draft | sent | paid | void"
-    }
-    DISPUTES {
-        bigserial dispute_id PK
-        text appointment_id FK
-        text invoice_id FK
-        text raised_by
-        text reason
-        jsonb evidence "source, confirm reply, call id"
-        text resolution "upheld | rejected | goodwill_credit"
-    }
-    V_UNBILLED_SHOWS {
-        text clinic_id
-        int shows
-        numeric value_usd
-    }
-    V_UNMARKED_APPOINTMENTS {
-        text clinic_id
-        int unmarked
-        numeric revenue_at_risk_usd
-        numeric avg_days_stale
-    }
-    V_CLINIC_SHOW_RATE {
-        text clinic_id
-        int resolved
-        int attended
-        numeric show_rate_pct
-    }
-    V_DISPUTE_SUMMARY {
-        text clinic_id
-        int disputes
-        int upheld
-        numeric upheld_pct
-    }
+ clinic_id | business_name        | unmarked | revenue_at_risk_usd | avg_days_stale
+-----------+----------------------+----------+---------------------+----------------
+ riverside | Riverside Chiro      |       16 |             1520.00 |            9.9
+ summit    | Summit Spine         |        5 |              600.00 |           13.7
 ```
 
-Schema: [`db/schema.sql`](db/schema.sql) · demo history: [`db/seed.sql`](db/seed.sql) (90 deterministic days, faults planted: Riverside's 16 unmarked / $1,520, Summit's 44% show rate vs 69–81% elsewhere, Oakwood's 3 disputes) · rule tests: [`db/verify.mjs`](db/verify.mjs)
+Two very different problems produce that top row, and both need chasing:
 
----
+1. The front desk stopped recording attendance → the agency is under-billing
+2. Nobody is checking → the data every other number depends on is rotting
 
-## 5. Project map
+**Run this first against any real account.** The number it returns is usually
+not zero.
 
-```
-db/schema.sql      clinics, billable_events, invoices, disputes + 4 views
-db/seed.sql        90 days demo history with planted faults
-db/verify.mjs      10 assertions over money rules (PGlite, no DB needed)
-n8n/               3 workflows (import into stock n8n):
-  01-nightly-outcome-sync   mirror GHL outcomes → billable_events
-  02-unmarked-alert          find revenue at risk → Slack before it ages out
-  03-invoice-generation      freeze rates → invoice lines per clinic per period
-dashboard/         Next.js read-only screen (see §7) — deploys to Vercel
-docs/              reconciliation rules + dispute handling
-```
+## Three rules, enforced in the schema
 
-### n8n setup
+**`unmarked` is a state, not an absence.** An appointment nobody marked is not a
+no-show. Collapsing the two makes show rate look worse and revenue look smaller,
+and hides the actual problem — that somebody stopped filling in a field.
 
-One Postgres credential named exactly **`Postgres account`**, instance env `GHL_AGENCY_TOKEN` (or point `01` at your real calendar API), `SLACK_WEBHOOK_URL`, `UNMARKED_ALERT_HOURS`. Import the three JSONs, run `02-unmarked-alert` manually — expect Riverside's $1,520. (On n8n Cloud, paste the Slack URL directly into the node; `$env` is restricted there.)
+**The rate is copied onto the event, never re-read at invoice time.** Rates
+change. An invoice must be reproducible a year later; re-deriving it from
+today's rate card silently rewrites history, and the first time a clinic notices,
+every invoice you have ever sent becomes questionable.
 
----
+**Cancelled is not no-show.** A patient who cancelled in advance did not fail to
+attend. Conflating them makes show rate useless for the conversation it exists
+to support.
 
-## 6. Run & verify
+## Nothing is automatic
+
+**The unmarked alert never auto-marks.** Guessing an outcome to clear an alert is
+how a billing system starts inventing revenue.
+
+**Invoices are generated as drafts, never sent.** An invoice is a claim on
+somebody's money. The system prepares it; a person sends it.
+
+**The nightly sync never walks an invoiced line backwards.** A re-sync cannot
+rewrite an invoice you have already issued.
+
+## Run it
 
 ```bash
 psql "$DATABASE_URL" -f db/schema.sql
-psql "$DATABASE_URL" -f db/seed.sql
-npm install && npm run verify   # 10/10, no database needed
+psql "$DATABASE_URL" -f db/seed.sql        # 90 days of demo history
+
 cd dashboard && npm install && npm run dev
 ```
 
-```sql
--- the three queries that matter
-SELECT * FROM v_unmarked_appointments;
-SELECT * FROM v_unbilled_shows;
-SELECT * FROM v_clinic_show_rate;
+Import the three workflows from `n8n/` and add one Postgres credential named
+exactly `Postgres account`.
+
+The seed plants what a real account looks like after a quiet quarter:
+
+| Clinic | What the workflows find |
+|---|---|
+| **Riverside** | 16 appointments nobody marked, **$1,520 not invoiced**, averaging 10 days old and concentrated in one stretch — a front desk that stopped recording on a particular day |
+| **Summit** | 44% show rate against 69–81% everywhere else |
+| **Oakwood** | Three disputes from one week, two upheld |
+
+## Verify
+
+```bash
+npm install && npm run verify
 ```
 
----
+Ten assertions over the billing rules, in an in-process Postgres. No database
+required.
 
-## 7. Dashboard — deploy to Vercel ⚠️ root directory note
+```
+PASS  returning patients excluded when the contract says so
+PASS  future appointments are not counted as unmarked
+PASS  show rate counts only resolved outcomes
+PASS  a rate change does not rewrite already-billable history
+```
 
-The dashboard is a **separate Next.js app in `dashboard/`**. When importing to Vercel set **Root Directory = `dashboard`** or the build fails. One env var: `DATABASE_URL`. Nothing else.
+These are money rules. They should fail loudly the moment somebody changes a
+definition, which is what this test is for.
 
-What it shows: four tiles (ready-to-invoice, unmarked, quiet clinics, open disputes) + tables for unmarked appointments (red-flagged when a clinic averages 7+ days without recording — *"front desk has stopped recording"*), ready-to-invoice, show rate (<55% flagged with diagnosis, not just number), open disputes. Read-only by design (`force-dynamic`, no cache — a cached billing figure gets quoted wrong to a client), tabular numerals, light+dark.
+## Layout
 
-Details: [`dashboard/README.md`](dashboard/README.md)
+| Path | |
+|---|---|
+| `db/schema.sql` | 4 tables, 4 views |
+| `db/seed.sql` | 90 days across 6 clinics, deterministic, faults planted |
+| `db/verify.mjs` | The ten assertions |
+| `n8n/` | Nightly sync, unmarked alert, invoice generation |
+| `dashboard/` | Read-only Next.js on Vercel, one env var |
+| `docs/reconciliation.md` | What bills, what doesn't, how disputes resolve |
 
----
+## Where this sits
 
-## 8. Where this sits
+[`frontdesk`](https://github.com/maqbuuul/frontdesk) books the appointment.
+[`ghl-provisioner`](https://github.com/maqbuuul/ghl-provisioner) builds the
+account and the workflows that get the patient to turn up.
 
-[`../frontdesk`](../frontdesk) books the appointment → [`../ghl-provisioner`](../ghl-provisioner) builds the account and the show-up workflows → **this** proves they turned up, which is the only event that produces an invoice. Built for the **Conek tech** application: the n8n run + this dashboard are the "cost per attended appointment" evidence.
+This proves they turned up — the only event that produces an invoice.
 
 ---
 
