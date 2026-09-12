@@ -11,6 +11,8 @@ an agency that takes $0 until a patient walks in.**
 [![Tests](https://img.shields.io/badge/tests-10_passing-1c6b58)](db/verify.mjs)
 [![License](https://img.shields.io/badge/license-MIT-1c6b58)](LICENSE)
 
+![The dashboard](docs/img/dashboard.png)
+
 ---
 
 ## The problem
@@ -74,16 +76,28 @@ SELECT * FROM v_unmarked_appointments;
 ```
 
 ```
- clinic_id | business_name        | unmarked | revenue_at_risk_usd | avg_days_stale
------------+----------------------+----------+---------------------+----------------
- riverside | Riverside Chiro      |       16 |             1520.00 |            9.9
- summit    | Summit Spine         |        5 |              600.00 |           13.7
+ business_name              | unmarked | revenue_at_risk_usd | unmarked_pct | avg_days_stale
+----------------------------+----------+---------------------+--------------+----------------
+ Riverside Chiropractic     |       15 |             1425.00 |          8.8 |           10.3
+ Summit Spine & Wellness    |        5 |              600.00 |          2.7 |           14.2
+ Pinecrest Chiropractic     |        4 |              420.00 |          2.2 |           11.3
+ Oakwood Family Chiro       |        3 |              330.00 |          1.9 |           16.9
 ```
 
 Two very different problems produce that top row, and both need chasing:
 
 1. The front desk stopped recording attendance → the agency is under-billing
 2. Nobody is checking → the data every other number depends on is rotting
+
+**`unmarked_pct` is the column that does the work.** Every front desk leaves a
+few stragglers, so a raw count just ranks clinics by size, and an average age
+just finds whoever has the oldest single straggler — Oakwood is the *stalest*
+here at 16.9 days on three appointments, and nothing is wrong with Oakwood.
+
+A desk that has actually stopped recording leaves a hole, and a hole shows up
+as a share: Riverside at 8.8% against 2.7% and below everywhere else. The
+dashboard flags on that, plus an age floor, so exactly one row lights up. A
+dashboard that flags every client has told you nothing.
 
 **Run this first against any real account.** The number it returns is usually
 not zero.
@@ -130,9 +144,14 @@ The seed plants what a real account looks like after a quiet quarter:
 
 | Clinic | What the workflows find |
 |---|---|
-| **Riverside** | 16 appointments nobody marked, **$1,520 not invoiced**, averaging 10 days old and concentrated in one stretch — a front desk that stopped recording on a particular day |
-| **Summit** | 44% show rate against 69–81% everywhere else |
+| **Riverside** | ~15 appointments nobody marked, **~$1,425 not invoiced**, averaging 10 days old and concentrated in one stretch — a front desk that stopped recording on a particular day |
+| **Summit** | ~45% show rate against 71–80% everywhere else |
 | **Oakwood** | Three disputes from one week, two upheld |
+
+The seed is anchored on `current_date`, so it always produces a realistic
+*recent* quarter rather than a fixed range that ages into irrelevance. The
+faults are deterministic; the exact counts move by a few either way depending
+on which weekday you load it.
 
 ## Verify
 

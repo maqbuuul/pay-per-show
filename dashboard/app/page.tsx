@@ -6,7 +6,15 @@ import {
 // somebody quotes to a client wrongly.
 export const dynamic = 'force-dynamic';
 
-const STALE_DAYS = 7;
+// A front desk that has stopped recording is not the same as one with a few
+// stragglers. Every clinic has stragglers, and ranking by raw count just ranks
+// clinics by size. So this needs BOTH: a material share of the clinic's own
+// appointments, and enough age that it is not simply this week's paperwork.
+const STOPPED_PCT  = 8;   // % of that clinic's past appointments left unmarked
+const STOPPED_DAYS = 7;   // averaging at least a week old
+
+const hasStopped = (r: { unmarked_pct: string; avg_days_stale: string }) =>
+  Number(r.unmarked_pct) >= STOPPED_PCT && Number(r.avg_days_stale) >= STOPPED_DAYS;
 
 export default async function Page() {
   const [unmarked, unbilled, rates, disputes] = await Promise.all([
@@ -16,7 +24,7 @@ export default async function Page() {
   const atRisk = sum(unmarked, 'revenue_at_risk_usd');
   const unmarkedCount = sum(unmarked, 'unmarked');
   const readyToBill = sum(unbilled, 'value_usd');
-  const stale = unmarked.filter(r => Number(r.avg_days_stale) >= STALE_DAYS);
+  const stopped = unmarked.filter(hasStopped);
 
   return (
     <main>
@@ -38,10 +46,12 @@ export default async function Page() {
           <span className="figure">{money(atRisk)}</span>
           <span className="note">{unmarkedCount} appointments with no outcome</span>
         </div>
-        <div className={`tile ${stale.length ? 'alert' : ''}`}>
-          <span className="label">Clinics gone quiet</span>
-          <span className="figure">{stale.length}</span>
-          <span className="note">averaging {STALE_DAYS}+ days without an outcome</span>
+        <div className={`tile ${stopped.length ? 'alert' : ''}`}>
+          <span className="label">Front desks gone quiet</span>
+          <span className="figure">{stopped.length}</span>
+          <span className="note">
+            {STOPPED_PCT}%+ of appointments unmarked, {STOPPED_DAYS}+ days old
+          </span>
         </div>
         <div className={`tile ${disputes.length ? 'warn' : ''}`}>
           <span className="label">Open disputes</span>
@@ -55,38 +65,42 @@ export default async function Page() {
         <p className="sub">
           Each of these is either revenue never invoiced, or a front desk that has
           stopped recording attendance. Both need chasing, for different reasons —
-          and neither raises an error on its own.
+          and neither raises an error on its own. <strong>Share</strong> is what
+          separates them: a few stragglers are normal, a double-digit share is a
+          desk that stopped.
         </p>
         {unmarked.length === 0 ? (
           <p className="empty">Nothing outstanding. Every past appointment has an outcome.</p>
         ) : (
-          <table>
+          <div className="scroller"><table>
             <thead>
               <tr>
                 <th>Clinic</th>
                 <th className="n">Unmarked</th>
                 <th className="n">Not invoiced</th>
+                <th className="n">Share</th>
                 <th className="n">Avg age</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {unmarked.map(r => {
-                const isStale = Number(r.avg_days_stale) >= STALE_DAYS;
+                const stoppedRow = hasStopped(r);
                 return (
-                  <tr key={r.clinic_id} className={isStale ? 'row-alert' : ''}>
+                  <tr key={r.clinic_id} className={stoppedRow ? 'row-alert' : ''}>
                     <td>{r.business_name}</td>
                     <td className="n">{r.unmarked}</td>
                     <td className="n strong">{money(r.revenue_at_risk_usd)}</td>
-                    <td className="n">{Number(r.avg_days_stale).toFixed(0)}d</td>
+                    <td className="n">{Number(r.unmarked_pct).toFixed(1)}%</td>
+                    <td className="n dim">{Number(r.avg_days_stale).toFixed(0)}d</td>
                     <td className="flag">
-                      {isStale ? 'front desk has stopped recording' : ''}
+                      {stoppedRow ? 'front desk has stopped recording' : ''}
                     </td>
                   </tr>
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         )}
       </section>
 
@@ -95,7 +109,7 @@ export default async function Page() {
         <p className="sub">
           Attended, billable under the contract, not yet on an invoice.
         </p>
-        <table>
+        <div className="scroller"><table>
           <thead>
             <tr>
               <th>Clinic</th>
@@ -116,7 +130,7 @@ export default async function Page() {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </section>
 
       <section>
@@ -126,7 +140,7 @@ export default async function Page() {
           cancelled in advance did not fail to attend, and merging the two makes
           the number useless for the conversation it exists to support.
         </p>
-        <table>
+        <div className="scroller"><table>
           <thead>
             <tr>
               <th>Clinic</th>
@@ -153,7 +167,7 @@ export default async function Page() {
               );
             })}
           </tbody>
-        </table>
+        </table></div>
       </section>
 
       {disputes.length > 0 && (
@@ -163,7 +177,7 @@ export default async function Page() {
             Watch the upheld rate, not the count. A rising upheld percentage means
             the attendance data is wrong, and that is a bigger problem than the credits.
           </p>
-          <table>
+          <div className="scroller"><table>
             <thead>
               <tr>
                 <th>Clinic</th>
@@ -184,7 +198,7 @@ export default async function Page() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </section>
       )}
 

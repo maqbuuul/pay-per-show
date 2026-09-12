@@ -118,5 +118,10 @@ footer {
 
 @media (max-width: 640px) {
   main { padding: 24px 14px 48px; }
-  table { display: block; overflow-x: auto; }
+
+  /* Scroll the table, don't squeeze it. Without a min-width the browser
+     crushes columns to fit and wraps prose one word per line, which is
+     harder to read than a sideways scroll. */
+  .scroller { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .scroller table { min-width: 540px; }
 }

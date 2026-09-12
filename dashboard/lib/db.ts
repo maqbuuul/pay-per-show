@@ -19,6 +19,7 @@ export type Unmarked = {
   revenue_at_risk_usd: string;
   oldest: string;
   avg_days_stale: string;
+  unmarked_pct: string;
 };
 
 export type Unbilled = {

@@ -134,6 +134,12 @@ GROUP BY 1, 2;
 -- whose front desk has stopped recording attendance -- and both need chasing,
 -- for different reasons.
 CREATE OR REPLACE VIEW v_unmarked_appointments AS
+WITH past AS (
+    SELECT clinic_id, count(*) AS appointments
+    FROM billable_events
+    WHERE starts_at < now() - interval '24 hours'
+    GROUP BY 1
+)
 SELECT b.clinic_id,
        c.business_name,
        count(*)                                     AS unmarked,
@@ -141,12 +147,18 @@ SELECT b.clinic_id,
                                                     AS revenue_at_risk_usd,
        min(b.starts_at)                             AS oldest,
        round(avg(extract(epoch FROM now() - b.starts_at) / 86400)::numeric, 1)
-                                                    AS avg_days_stale
+                                                    AS avg_days_stale,
+       -- Unmarked as a share of everything that clinic has had happen.
+       -- Every front desk leaves a few stragglers, and a raw count just
+       -- ranks clinics by size. A desk that has actually STOPPED recording
+       -- leaves a hole, and a hole shows up as a percentage.
+       round(100.0 * count(*) / p.appointments, 1)  AS unmarked_pct
 FROM billable_events b
 JOIN clinics c USING (clinic_id)
+JOIN past p     USING (clinic_id)
 WHERE b.outcome = 'unmarked'
   AND b.starts_at < now() - interval '24 hours'
-GROUP BY 1, 2, c.rate_per_show_cents
+GROUP BY 1, 2, c.rate_per_show_cents, p.appointments
 ORDER BY 4 DESC;
 
 -- 3. Show rate per clinic, on the same definition billing uses.
