@@ -1,23 +1,11 @@
--- Pay-per-show billing.
+-- Pay-per-show billing schema.
 --
--- The agency takes $0 until a patient walks in. So the entire commercial
--- relationship rests on one question -- who actually showed up -- and that
--- answer has to survive a clinic disagreeing with it.
---
--- Design decisions worth knowing before changing anything here:
---
--- 1. `billable_events` is append-only in spirit. A show is never deleted, only
---    moved through states. When a clinic disputes an invoice line six weeks
---    later, the history of that line is the argument.
---
--- 2. The rate is copied onto the event at the moment it becomes billable, not
---    read from the clinic at invoice time. Rates change. An invoice must be
---    reproducible a year later, and re-deriving it from today's rate card
---    silently rewrites history.
---
--- 3. `unmarked` is a first-class state, not an absence. An appointment nobody
---    marked is not a no-show -- it is missing data, and under pay-per-show
---    missing data is unbilled revenue.
+-- Invariants the rest of the system assumes:
+--   * billable_events is append-only in spirit; a show moves through states,
+--     it is never deleted.
+--   * rate_cents is copied onto the event when it becomes billable, never
+--     re-read from clinics at invoice time, so old invoices stay reproducible.
+--   * 'unmarked' is a state, not an absence. It is not a no-show.
 
 CREATE TABLE IF NOT EXISTS clinics (
     clinic_id        text PRIMARY KEY,           -- GHL sub-account
@@ -127,12 +115,8 @@ WHERE b.outcome = 'attended'
   AND (c.bills_returning OR b.is_new_patient)
 GROUP BY 1, 2;
 
--- 2. The one that finds money.
---
--- Appointments whose time has passed that nobody ever marked. Under
--- pay-per-show each of these is either revenue never invoiced, or a clinic
--- whose front desk has stopped recording attendance -- and both need chasing,
--- for different reasons.
+-- Past appointments with no outcome recorded: unbilled revenue, or a front
+-- desk that stopped recording. unmarked_pct separates the two.
 CREATE OR REPLACE VIEW v_unmarked_appointments AS
 WITH past AS (
     SELECT clinic_id, count(*) AS appointments
@@ -148,10 +132,8 @@ SELECT b.clinic_id,
        min(b.starts_at)                             AS oldest,
        round(avg(extract(epoch FROM now() - b.starts_at) / 86400)::numeric, 1)
                                                     AS avg_days_stale,
-       -- Unmarked as a share of everything that clinic has had happen.
-       -- Every front desk leaves a few stragglers, and a raw count just
-       -- ranks clinics by size. A desk that has actually STOPPED recording
-       -- leaves a hole, and a hole shows up as a percentage.
+       -- Share of that clinic's own past appointments. A raw count ranks
+       -- clinics by size; a share does not.
        round(100.0 * count(*) / p.appointments, 1)  AS unmarked_pct
 FROM billable_events b
 JOIN clinics c USING (clinic_id)
@@ -161,11 +143,8 @@ WHERE b.outcome = 'unmarked'
 GROUP BY 1, 2, c.rate_per_show_cents, p.appointments
 ORDER BY 4 DESC;
 
--- 3. Show rate per clinic, on the same definition billing uses.
---
--- Cancelled appointments are excluded rather than counted as failures: a
--- patient who cancelled in advance did not no-show, and conflating the two
--- makes the number useless for the conversation it exists to support.
+-- Show rate on the same definition billing uses. Cancelled is excluded: a
+-- patient who cancelled in advance did not no-show.
 CREATE OR REPLACE VIEW v_clinic_show_rate AS
 SELECT clinic_id,
        count(*) FILTER (WHERE outcome IN ('attended','no_show'))  AS resolved,
@@ -180,8 +159,7 @@ FROM billable_events
 WHERE starts_at < now()
 GROUP BY 1;
 
--- 4. Dispute rate. Rising means the attendance data is not trusted, and that
---    is a bigger problem than the credits themselves.
+-- Dispute rate. Watch the upheld share, not the count.
 CREATE OR REPLACE VIEW v_dispute_summary AS
 SELECT b.clinic_id,
        count(*)                                              AS disputes,

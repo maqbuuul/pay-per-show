@@ -1,26 +1,11 @@
--- Demo seed.
+-- Synthetic demo seed: 90 days of billing history, 6 clinics.
+-- Not real client data. Deterministic (pseudo-randomness hashed off stable
+-- keys) and idempotent (only touches ids prefixed `demo_`).
 --
--- Ninety days of billing history across six chiropractic clinics, so the views
--- return real numbers instead of empty sets and the n8n workflows have
--- something to find on their first run.
---
--- Faults are planted deliberately:
---
---   riverside     ~16 appointments nobody marked, averaging ~10 days old and
---                 concentrated in one recent stretch. That shape is the tell:
---                 a front desk stopped recording attendance on a particular
---                 day. It is the largest source of lost revenue in a
---                 pay-per-show agency and it never raises an error.
---
---   summit        show rate in the 40s against 69-81% elsewhere -- the clinic
---                 that books fine and converts badly
---
---   oakwood       three disputes from one week, two upheld
---
--- Deterministic: pseudo-randomness is hashed off stable keys, so two runs
--- produce identical data and a number quoted on Monday is still true on Friday.
---
--- Idempotent: deletes only rows it owns (`demo_` prefixed ids) and rebuilds.
+-- Planted faults, so the views and workflows have something to find:
+--   riverside  ~15 unmarked, ~10 days old, clustered -- a desk that stopped
+--   summit     show rate in the 40s against 70-80% elsewhere
+--   oakwood    3 disputes in one week, 2 upheld
 --
 --   psql "$DATABASE_URL" -f db/schema.sql
 --   psql "$DATABASE_URL" -f db/seed.sql
@@ -186,7 +171,7 @@ INSERT INTO disputes (appointment_id, invoice_id, raised_by, raised_at, reason,
                       evidence, resolution, resolved_at, resolved_by, note)
 SELECT b.appointment_id,
        b.invoice_id,
-       'Oakwood Family Chiro',
+       'clinic:front_desk',
        b.starts_at + interval '20 days',
        'Practice says this patient did not attend',
        jsonb_build_object('booked_by', b.booked_by,

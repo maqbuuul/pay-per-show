@@ -1,81 +1,51 @@
 # Pay Per Show
 
-**Reconciles attended appointments into billable shows — the billing engine for
-an agency that takes $0 until a patient walks in.**
+Billing reconciliation for an agency that charges per patient who attends.
+Postgres schema, three n8n workflows, and a read-only Next.js dashboard.
 
 [![Postgres](https://img.shields.io/badge/Neon_Postgres-16-336791?logo=postgresql&logoColor=white)](https://neon.tech)
 [![n8n](https://img.shields.io/badge/n8n-3_workflows-EA4B71?logo=n8n&logoColor=white)](https://n8n.io)
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://typescriptlang.org)
-[![Vercel](https://img.shields.io/badge/Vercel-live-000000?logo=vercel&logoColor=white)](https://pay-per-show.vercel.app)
 [![Tests](https://img.shields.io/badge/tests-10_passing-1c6b58)](db/verify.mjs)
 [![License](https://img.shields.io/badge/license-MIT-1c6b58)](LICENSE)
 
-**→ [pay-per-show.vercel.app](https://pay-per-show.vercel.app)**
+**[pay-per-show.vercel.app](https://pay-per-show.vercel.app)** — runs on
+synthetic seed data, not a real client account.
 
 ![The dashboard](docs/img/dashboard.png)
 
----
+Drill down into a clinic for its individual appointments, invoices and disputes:
 
-## The problem
+![Clinic drill-down](docs/img/clinic.png)
 
-If you bill per patient who shows up, somebody has to prove who showed up.
+## What it does
 
-At five clinics that's a spreadsheet. At five hundred it's a full-time job
-nobody has, and it fails in three directions at once — none of which throws an
-error:
+If you bill per attendance, you have to be able to prove attendance. This
+tracks appointments through outcome states, freezes the rate when a show
+becomes billable, generates draft invoices, and reports what is missing.
 
-- **Appointments nobody marked.** Not a no-show. Missing data. Under
-  pay-per-show that is revenue never invoiced
-- **Disputes you can't answer.** A clinic says "that patient never came." Six
-  weeks later, what's the evidence?
-- **Rates that moved.** You raised a clinic's rate in March. An invoice
-  regenerated in June must still show March's number
+The dashboard supports date ranges (7/30/90/365 days), per-clinic filtering,
+column sorting, drill-down into a clinic's individual appointments with
+pagination, and CSV export of any table.
 
-## Architecture
+## Data model
 
-```mermaid
-flowchart LR
-    SRC["Clinic calendar<br/>GoHighLevel · Cal.com"]:::ext
+Four tables: `clinics`, `billable_events`, `invoices`, `disputes`.
 
-    subgraph n8n["n8n · scheduled"]
-        SYNC["01 nightly outcome sync<br/>full refresh, 45d window"]
-        ALERT["02 unmarked alert<br/>weekday 09:00"]
-        INV["03 invoice generation<br/>1st of month"]
-    end
+| Rule | Where it lives |
+|---|---|
+| A show moves through states and is never deleted | `billable_events.state` |
+| The rate is copied onto the event when it becomes billable, never re-read at invoice time | `billable_events.rate_cents` |
+| `unmarked` is a state, not an absence, and is not a no-show | `billable_events.outcome` |
+| Cancelled is excluded from show rate, not counted as a failure | `v_clinic_show_rate` |
 
-    subgraph db["Neon · Postgres"]
-        BE[("billable_events")]
-        INVT[("invoices")]
-        DISP[("disputes")]
-        V["v_unmarked_appointments<br/>v_unbilled_shows<br/>v_clinic_show_rate"]
-    end
+Rates change. Copying the rate onto the event keeps an invoice reproducible a
+year later; re-deriving it from the current rate card rewrites history silently.
 
-    DASH["Dashboard<br/>Vercel · read-only"]
-    SLACK["Slack"]:::ext
+## Finding a front desk that stopped recording
 
-    SRC --> SYNC
-    SYNC -- "idempotent upsert" --> BE
-    SYNC -- "freeze rate<br/>when it becomes billable" --> BE
-    BE --> V
-    DISP --> V
-    ALERT --> V
-    ALERT -- "revenue nobody invoiced" --> SLACK
-    INV --> BE
-    INV -- "draft, never sent" --> INVT
-    V --> DASH
-
-    classDef ext fill:#f2efe9,stroke:#cfc8ba,color:#46574f
-    classDef default fill:#ffffff,stroke:#0d3b34,color:#14201d
-    style n8n fill:#eef4f2,stroke:#bcd5cf
-    style db fill:#f4f1ec,stroke:#dfd8cc
-```
-
-## The view that finds money
-
-```sql
-SELECT * FROM v_unmarked_appointments;
-```
+`v_unmarked_appointments` reports unmarked appointments per clinic, with
+`unmarked_pct` — unmarked as a share of that clinic's own past appointments.
 
 ```
  business_name              | unmarked | revenue_at_risk_usd | unmarked_pct | avg_days_stale
@@ -86,83 +56,61 @@ SELECT * FROM v_unmarked_appointments;
  Oakwood Family Chiro       |        3 |              330.00 |          1.9 |           16.9
 ```
 
-Two very different problems produce that top row, and both need chasing:
+The share is the column that matters. A raw count ranks clinics by size, and
+average age just finds whoever has the oldest straggler — Oakwood is stalest
+here at 16.9 days and nothing is wrong with it. The dashboard flags on
+`unmarked_pct >= 8` plus a 7-day age floor, which selects one row. The n8n
+alert applies the same two thresholds, so the two cannot disagree.
 
-1. The front desk stopped recording attendance → the agency is under-billing
-2. Nobody is checking → the data every other number depends on is rotting
+## What is never automatic
 
-**`unmarked_pct` is the column that does the work.** Every front desk leaves a
-few stragglers, so a raw count just ranks clinics by size, and an average age
-just finds whoever has the oldest single straggler — Oakwood is the *stalest*
-here at 16.9 days on three appointments, and nothing is wrong with Oakwood.
+- The unmarked alert does not auto-mark. Guessing an outcome to clear an alert
+  invents revenue.
+- Invoices generate as drafts. A person sends them.
+- The nightly sync will not move a line that is already invoiced.
 
-A desk that has actually stopped recording leaves a hole, and a hole shows up
-as a share: Riverside at 8.8% against 2.7% and below everywhere else. The
-dashboard flags on that, plus an age floor, so exactly one row lights up. A
-dashboard that flags every client has told you nothing.
+## Disputes
 
-**Run this first against any real account.** The number it returns is usually
-not zero.
-
-## Three rules, enforced in the schema
-
-**`unmarked` is a state, not an absence.** An appointment nobody marked is not a
-no-show. Collapsing the two makes show rate look worse and revenue look smaller,
-and hides the actual problem — that somebody stopped filling in a field.
-
-**The rate is copied onto the event, never re-read at invoice time.** Rates
-change. An invoice must be reproducible a year later; re-deriving it from
-today's rate card silently rewrites history, and the first time a clinic notices,
-every invoice you have ever sent becomes questionable.
-
-**Cancelled is not no-show.** A patient who cancelled in advance did not fail to
-attend. Conflating them makes show rate useless for the conversation it exists
-to support.
-
-## Nothing is automatic
-
-**The unmarked alert never auto-marks.** Guessing an outcome to clear an alert is
-how a billing system starts inventing revenue.
-
-**Invoices are generated as drafts, never sent.** An invoice is a claim on
-somebody's money. The system prepares it; a person sends it.
-
-**The nightly sync never walks an invoiced line backwards.** A re-sync cannot
-rewrite an invoice you have already issued.
+`disputes.evidence` captures what the appointment looked like when it was
+marked: who booked it, which sync set the outcome, and when. The clinic
+drill-down renders it inline, so a dispute raised weeks later can be answered
+without opening another system.
 
 ## Run it
 
 ```bash
 psql "$DATABASE_URL" -f db/schema.sql
-psql "$DATABASE_URL" -f db/seed.sql        # 90 days of demo history
+psql "$DATABASE_URL" -f db/seed.sql
 
 cd dashboard && npm install && npm run dev
 ```
 
+`dashboard/.env.example` lists the variables. `DATABASE_URL` is required;
+`AGENCY_TZ` is optional and defaults to `America/New_York`.
+
 Import the three workflows from `n8n/` and add one Postgres credential named
-exactly `Postgres account`.
+`Postgres account`.
 
-The seed plants what a real account looks like after a quiet quarter:
+## Seed data
 
-| Clinic | What the workflows find |
+Synthetic, deterministic, idempotent — it only touches ids prefixed `demo_`.
+Anchored on `current_date`, so it always produces a recent quarter; exact
+counts shift by a few depending on which weekday you load it.
+
+| Clinic | Planted fault |
 |---|---|
-| **Riverside** | ~15 appointments nobody marked, **~$1,425 not invoiced**, averaging 10 days old and concentrated in one stretch — a front desk that stopped recording on a particular day |
-| **Summit** | ~45% show rate against 71–80% everywhere else |
-| **Oakwood** | Three disputes from one week, two upheld |
+| Riverside | ~15 unmarked, ~$1,425, clustered in one stretch |
+| Summit | show rate in the 40s against 70–80% elsewhere |
+| Oakwood | 3 disputes in one week, 2 upheld |
 
-The seed is anchored on `current_date`, so it always produces a realistic
-*recent* quarter rather than a fixed range that ages into irrelevance. The
-faults are deterministic; the exact counts move by a few either way depending
-on which weekday you load it.
-
-## Verify
+## Tests
 
 ```bash
 npm install && npm run verify
 ```
 
-Ten assertions over the billing rules, in an in-process Postgres. No database
-required.
+Ten assertions over the billing rules, run against an in-process Postgres
+(PGlite). No database required.
 
 ```
 PASS  returning patients excluded when the contract says so
@@ -171,27 +119,22 @@ PASS  show rate counts only resolved outcomes
 PASS  a rate change does not rewrite already-billable history
 ```
 
-These are money rules. They should fail loudly the moment somebody changes a
-definition, which is what this test is for.
-
 ## Layout
 
 | Path | |
 |---|---|
 | `db/schema.sql` | 4 tables, 4 views |
-| `db/seed.sql` | 90 days across 6 clinics, deterministic, faults planted |
+| `db/seed.sql` | 90 days across 6 clinics |
 | `db/verify.mjs` | The ten assertions |
 | `n8n/` | Nightly sync, unmarked alert, invoice generation |
-| `dashboard/` | Read-only Next.js on Vercel — `DATABASE_URL`, plus optional `AGENCY_TZ` |
+| `dashboard/` | Next.js, read-only |
 | `docs/reconciliation.md` | What bills, what doesn't, how disputes resolve |
 
-## Where this sits
+## Related
 
 [`frontdesk`](https://github.com/maqbuuul/frontdesk) books the appointment.
 [`ghl-provisioner`](https://github.com/maqbuuul/ghl-provisioner) builds the
-account and the workflows that get the patient to turn up.
-
-This proves they turned up — the only event that produces an invoice.
+account. This bills for the ones who attended.
 
 ---
 
