@@ -10,6 +10,12 @@ export const dynamic = 'force-dynamic';
 // stragglers. Every clinic has stragglers, and ranking by raw count just ranks
 // clinics by size. So this needs BOTH: a material share of the clinic's own
 // appointments, and enough age that it is not simply this week's paperwork.
+// Vercel runs in UTC. Rendering the date in the server's zone puts the header
+// a day behind whoever is reading it for most of their working evening, and a
+// billing page that cannot agree with you about what day it is does not get
+// believed about the money either.
+const AGENCY_TZ = process.env.AGENCY_TZ ?? 'America/New_York';
+
 const STOPPED_PCT  = 8;   // % of that clinic's past appointments left unmarked
 const STOPPED_DAYS = 7;   // averaging at least a week old
 
@@ -31,7 +37,7 @@ export default async function Page() {
       <header className="top">
         <h1>Pay Per Show</h1>
         <p>Billing reconciliation · {new Date().toLocaleDateString('en-GB', {
-          day: 'numeric', month: 'long', year: 'numeric',
+          day: 'numeric', month: 'long', year: 'numeric', timeZone: AGENCY_TZ,
         })}</p>
       </header>
 

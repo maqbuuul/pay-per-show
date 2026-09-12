@@ -7,9 +7,11 @@ an agency that takes $0 until a patient walks in.**
 [![n8n](https://img.shields.io/badge/n8n-3_workflows-EA4B71?logo=n8n&logoColor=white)](https://n8n.io)
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://typescriptlang.org)
-[![Vercel](https://img.shields.io/badge/Vercel-dashboard-000000?logo=vercel&logoColor=white)](https://vercel.com)
+[![Vercel](https://img.shields.io/badge/Vercel-live-000000?logo=vercel&logoColor=white)](https://pay-per-show.vercel.app)
 [![Tests](https://img.shields.io/badge/tests-10_passing-1c6b58)](db/verify.mjs)
 [![License](https://img.shields.io/badge/license-MIT-1c6b58)](LICENSE)
+
+**→ [pay-per-show.vercel.app](https://pay-per-show.vercel.app)**
 
 ![The dashboard](docs/img/dashboard.png)
 
@@ -180,7 +182,7 @@ definition, which is what this test is for.
 | `db/seed.sql` | 90 days across 6 clinics, deterministic, faults planted |
 | `db/verify.mjs` | The ten assertions |
 | `n8n/` | Nightly sync, unmarked alert, invoice generation |
-| `dashboard/` | Read-only Next.js on Vercel, one env var |
+| `dashboard/` | Read-only Next.js on Vercel — `DATABASE_URL`, plus optional `AGENCY_TZ` |
 | `docs/reconciliation.md` | What bills, what doesn't, how disputes resolve |
 
 ## Where this sits
