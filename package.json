@@ -3,8 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Reconcile attended appointments into billable shows. The billing engine for a pay-per-show agency.",
-  "engines": { "node": ">=22" },
-  "scripts": { "verify": "node db/verify.mjs" },
-  "devDependencies": { "@electric-sql/pglite": "^0.5.8" }
+  "description": "Billing operations for an agency that charges clinics per patient who attends.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node db/test.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
+  }
 }

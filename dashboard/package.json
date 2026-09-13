@@ -1,12 +1,14 @@
 {
-  "name": "pay-per-show-dashboard",
+  "name": "pay-per-show-app",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate": "node --env-file=.env.local scripts/migrate.mjs",
+    "create-user": "node --env-file=.env.local scripts/create-user.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
@@ -17,6 +19,8 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.7",
-    "typescript": "^5.7.3"
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^5.7.3",
+    "ws": "^8.21.3"
   }
 }

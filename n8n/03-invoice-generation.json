@@ -16,19 +16,25 @@
       "name": "1st of month, 6am",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [-680, 300]
+      "position": [
+        -680,
+        300
+      ]
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- One row per clinic with billable shows in the period just closed.\n--\n-- rate_cents comes off the EVENT, not the clinic. If a rate changed\n-- mid-period, each show bills at what it was worth on the day -- which is\n-- the only way an invoice stays reproducible a year later.\nWITH period AS (\n  SELECT (date_trunc('month', current_date) - interval '1 month')::date AS p_start,\n         (date_trunc('month', current_date) - interval '1 day')::date   AS p_end\n)\nSELECT b.clinic_id,\n       c.business_name,\n       c.currency,\n       c.minimum_cents,\n       p.p_start,\n       p.p_end,\n       count(*)                                    AS shows,\n       sum(b.rate_cents)                           AS subtotal_cents,\n       array_agg(b.appointment_id ORDER BY b.starts_at) AS appointment_ids\nFROM billable_events b\nJOIN clinics c USING (clinic_id)\nCROSS JOIN period p\nWHERE b.state = 'billable'\n  AND b.outcome = 'attended'\n  AND b.starts_at::date BETWEEN p.p_start AND p.p_end\n  AND NOT EXISTS (\n        SELECT 1 FROM disputes d\n         WHERE d.appointment_id = b.appointment_id\n           AND d.resolved_at IS NULL)\nGROUP BY 1,2,3,4,5,6\nHAVING count(*) > 0;",
+        "query": "-- Drafts each clinic's last closed period in its own timezone. Includes shows\n-- marked late from earlier periods, tops up to the contract minimum, then\n-- applies credits. Sent invoices are never touched.\nSELECT c.name                                             AS clinic,\n       r->>'result'                                       AS result,\n       i.shows_count,\n       to_char(i.total_cents / 100.0, 'FM999,999,990.00') AS total\n  FROM jsonb_array_elements(pps.draft_invoices(NULL::date, 'n8n')) AS r\n  JOIN pps.clinics c ON c.clinic_id = r->>'clinic_id'\n  JOIN pps.invoices i ON i.invoice_id = r->>'invoice_id'\n WHERE r->>'result' IN ('drafted', 'refreshed')\n ORDER BY c.name;",
         "options": {}
       },
       "id": "gather-0002",
-      "name": "Gather billable shows",
+      "name": "Draft invoices",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.4,
-      "position": [-460, 300],
+      "position": [
+        -460,
+        300
+      ],
       "credentials": {
         "postgres": {
           "id": "postgres-main",
@@ -39,85 +45,46 @@
     },
     {
       "parameters": {
-        "jsCode": "// Build the invoice line, apply credits from disputes upheld since the last\n// run, and honour the contract minimum.\n//\n// Everything here is arithmetic on numbers the database already froze. The\n// workflow does not decide what a show is worth -- that was decided when the\n// event became billable.\n\nconst out = [];\nfor (const item of $input.all()) {\n  const r = item.json;\n  const subtotal = Number(r.subtotal_cents || 0);\n  const minimum  = Number(r.minimum_cents || 0);\n  const shows    = Number(r.shows || 0);\n\n  const adjustment = Math.max(0, minimum - subtotal);   // top up to the floor\n  const total = subtotal + adjustment;\n\n  const period = `${r.p_start} to ${r.p_end}`;\n  const id = `inv_${r.clinic_id}_${String(r.p_start).slice(0, 7)}`;\n\n  out.push({\n    json: {\n      invoice_id: id,\n      clinic_id: r.clinic_id,\n      business_name: r.business_name,\n      period_start: r.p_start,\n      period_end: r.p_end,\n      shows_count: shows,\n      subtotal_cents: subtotal,\n      adjustment_cents: adjustment,\n      total_cents: total,\n      currency: r.currency || 'USD',\n      appointment_ids: r.appointment_ids,\n      summary: `${r.business_name}: ${shows} attended, ${(total / 100).toFixed(2)} ${r.currency || 'USD'} for ${period}` +\n               (adjustment ? ` (incl. ${(adjustment / 100).toFixed(2)} contract minimum top-up)` : '')\n    }\n  });\n}\nreturn out;"
-      },
-      "id": "build-0003",
-      "name": "Build invoice lines",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [-240, 300]
-    },
-    {
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "-- Draft, never sent. An invoice is a claim on somebody's money; the system\n-- prepares it and a person sends it.\nINSERT INTO invoices\n  (invoice_id, clinic_id, period_start, period_end, shows_count,\n   subtotal_cents, adjustment_cents, total_cents, status)\nVALUES ($1, $2, $3::date, $4::date, $5, $6, $7, $8, 'draft')\nON CONFLICT (clinic_id, period_start, period_end) DO UPDATE\n   SET shows_count      = EXCLUDED.shows_count,\n       subtotal_cents   = EXCLUDED.subtotal_cents,\n       adjustment_cents = EXCLUDED.adjustment_cents,\n       total_cents      = EXCLUDED.total_cents\n   WHERE invoices.status = 'draft'   -- never rewrite one already sent\nRETURNING invoice_id, total_cents;",
-        "options": {
-          "queryReplacement": "={{ $json.invoice_id }},{{ $json.clinic_id }},{{ $json.period_start }},{{ $json.period_end }},{{ $json.shows_count }},{{ $json.subtotal_cents }},{{ $json.adjustment_cents }},{{ $json.total_cents }}"
-        }
-      },
-      "id": "insert-0004",
-      "name": "Write draft invoice",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
-      "position": [-20, 300],
-      "credentials": {
-        "postgres": {
-          "id": "postgres-main",
-          "name": "Postgres account"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "-- Attach the events to the invoice so a disputed line can be traced back to\n-- the appointment, the booking source, and the recording.\nUPDATE billable_events\n   SET state = 'invoiced',\n       invoice_id = $1\n WHERE appointment_id = ANY(string_to_array($2, ','))\n   AND state = 'billable';",
-        "options": {
-          "queryReplacement": "={{ $('Build invoice lines').item.json.invoice_id }},{{ $('Build invoice lines').item.json.appointment_ids.join(',') }}"
-        }
-      },
-      "id": "attach-0005",
-      "name": "Mark events invoiced",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
-      "position": [200, 300],
-      "credentials": {
-        "postgres": {
-          "id": "postgres-main",
-          "name": "Postgres account"
-        }
-      }
-    },
-    {
-      "parameters": {
         "method": "POST",
         "url": "={{ $env.SLACK_WEBHOOK_URL }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ text: ':page_facing_up: *Draft invoices ready for review*\\n' + $('Build invoice lines').all().map(i => '• ' + i.json.summary).join('\\n') + '\\n\\n_Drafts only. Nothing has been sent._' }) }}",
+        "jsonBody": "={{ JSON.stringify({ text: ':page_facing_up: *Draft invoices ready for review*\n' + $('Draft invoices').all().map(i => '• ' + i.json.clinic + ': ' + i.json.shows_count + ' shows, ' + i.json.total + ' (' + i.json.result + ')').join('\n') + '\n\n_Drafts only. Nothing has been sent._' }) }}",
         "options": {}
       },
       "id": "notify-0006",
       "name": "Notify for review",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [420, 300]
+      "position": [
+        420,
+        300
+      ],
+      "executeOnce": true
     }
   ],
   "connections": {
     "1st of month, 6am": {
-      "main": [[{ "node": "Gather billable shows", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Draft invoices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
-    "Gather billable shows": {
-      "main": [[{ "node": "Build invoice lines", "type": "main", "index": 0 }]]
-    },
-    "Build invoice lines": {
-      "main": [[{ "node": "Write draft invoice", "type": "main", "index": 0 }]]
-    },
-    "Write draft invoice": {
-      "main": [[{ "node": "Mark events invoiced", "type": "main", "index": 0 }]]
-    },
-    "Mark events invoiced": {
-      "main": [[{ "node": "Notify for review", "type": "main", "index": 0 }]]
+    "Draft invoices": {
+      "main": [
+        [
+          {
+            "node": "Notify for review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
